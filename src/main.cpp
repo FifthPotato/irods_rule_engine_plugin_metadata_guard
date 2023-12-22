@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <optional>
+#include <unordered_map>
 
 namespace
 {
@@ -90,20 +91,52 @@ namespace
 
     auto rule_exists(irods::default_re_ctx&, const std::string& _rule_name, bool& _exists) -> irods::error
     {
-        _exists = (_rule_name == "pep_api_mod_avu_metadata_pre");
+        _exists = (_rule_name == "pep_api_mod_avu_metadata_pre") || (_rule_name == "pep_api_atomic_apply_metadata_operations_pre");
         return SUCCESS();
     }
 
     auto list_rules(irods::default_re_ctx&, std::vector<std::string>& _rules) -> irods::error
     {
         _rules.push_back("pep_api_mod_avu_metadata_pre");
+        _rules.push_back("pep_api_atomic_apply_metadata_operations_pre");
         return SUCCESS();
     }
 
-    auto exec_rule(irods::default_re_ctx&,
-                   const std::string& _rule_name,
-                   std::list<boost::any>& _rule_arguments,
-                   irods::callback _effect_handler) -> irods::error
+    auto rule_logic(const std::string& _object_name, ruleExecInfo_t& rei) -> irods::error
+    {
+        const auto config = load_plugin_config(rei);
+        const auto& prefixes = config->at("prefixes");
+        if(std::any_of(prefixes.cbegin(), prefixes.cend(), [&_object_name](const json& prefix) { return boost::starts_with(_object_name, prefix.get_ref<const std::string&>()); })) {
+            if (config->count("admin_only") && config->at("admin_only").get<bool>()) {
+                return user_is_administrator(*rei.rsComm);
+            }
+
+            namespace adm = irods::experimental::administration;
+            const adm::user user{rei.uoic->userName, rei.uoic->rodsZone};
+            const auto& editors = config->at("editors");
+
+            if(std::any_of(editors.cbegin(), editors.cend(), [&rei, &user](const json& editor) { 
+                    const auto& type = editor.at("type").get_ref<const std::string&>();
+                    const auto& name { editor.at("name").get_ref<const std::string&>() };
+                    if(type == "user") {
+                        return adm::server::local_unique_name(*rei.rsComm, user) == name;
+                    }
+                    else if(type == "group") {
+                        const adm::group group { name };
+                        return adm::server::user_is_member_of_group(*rei.rsComm, group, user); 
+                    }
+                    else {
+                        return false;
+                    }
+               })) {
+            return CODE(RULE_ENGINE_CONTINUE);
+            }
+            return ERROR(CAT_INSUFFICIENT_PRIVILEGE_LEVEL, "User is not allowed to modify metadata");
+        }
+        return CODE(RULE_ENGINE_CONTINUE);
+    }
+
+    auto exec_rule_modavu(std::list<boost::any>& _rule_arguments, irods::callback _effect_handler) -> irods::error 
     {
         try {
             auto* input = boost::any_cast<modAVUMetadataInp_t*>(*std::next(std::begin(_rule_arguments), 2));
@@ -168,8 +201,74 @@ namespace
         catch (const std::exception& e) {
             log_re::error({{"log_message", e.what()}, {"rule_engine_plugin", "metadata_guard"}});
         }
-
         return CODE(RULE_ENGINE_CONTINUE);
+    }
+
+    auto exec_rule_atomic_metadata(std::list<boost::any>& _rule_arguments, irods::callback _effect_handler) -> irods::error 
+    {
+        auto is_input_valid = [](const bytesBuf_t* _input) -> std::tuple<bool, std::string>
+        {
+            if (!_input) {
+                return {false, "Missing JSON input"};
+            }
+
+            if (_input->len <= 0) {
+                return {false, "Length of buffer must be greater than zero"};
+            }
+
+            if (!_input->buf) {
+                return {false, "Missing input buffer"};
+            }
+
+            return {true, ""};
+        };
+
+        try {
+            auto* input_bb = boost::any_cast<bytesBuf_t*>(*std::next(std::begin(_rule_arguments), 2));
+            auto& rei = get_rei(_effect_handler);
+            const auto config = load_plugin_config(rei);
+
+            if (const auto [valid, msg] = is_input_valid(input_bb); !valid) {
+                log_re::error({{"log_message", msg}, {"error_message", e.what()}});
+                return ERROR(INPUT_ARG_NOT_WELL_FORMED_ERR, msg);
+            }
+
+            json input = json::parse(std::string(static_cast<const char*>(input_bb->buf), input_bb->len));
+
+            const auto& operations = input.at("operations");
+            std::vector<irods::error> op_codes; 
+            std::transform(operations.begin(), operations.end(), op_codes.begin(), [&rei](json op) {
+                return rule_logic(op.at("attribute").get_ref<const std::string&>(), rei);
+            });
+            if(const auto& ret = std::find_if(op_codes.begin(), op_codes.end(), [&op_codes](const irods::error& err) { return !err.ok(); }); ret != op_codes.end()) {
+                return *ret;
+            }
+                return CODE(RULE_ENGINE_CONTINUE);
+        }
+        catch (const json::parse_error& e) {
+            log_re::error({{"log_message", "Failed to parse input into JSON"}, {"error_message", e.what()}});
+        }
+        catch (const std::exception& e) {
+            log_re::error({{"log_message", e.what()}, {"rule_engine_plugin", "metadata_guard"}});
+        }
+        return CODE(RULE_ENGINE_CONTINUE);
+    }
+
+    
+    auto exec_rule(irods::default_re_ctx&,
+                   const std::string& _rule_name,
+                   std::list<boost::any>& _rule_arguments,
+                   irods::callback _effect_handler) -> irods::error
+    {
+        std::unordered_map<std::string, std::function<irods::error(std::list<boost::any>&, irods::callback )>> lookup_table{
+            {"pep_api_mod_avu_metadata_pre",  exec_rule_modavu},
+            {"pep_api_atomic_apply_metadata_operations_pre", exec_rule_atomic_metadata}};
+        if(lookup_table.contains(_rule_name)) {
+            return lookup_table.at(_rule_name)(_rule_arguments, _effect_handler);
+        }
+        else {
+            return CODE(RULE_ENGINE_CONTINUE);
+        }
     }
 } // namespace (anonymous)
 
