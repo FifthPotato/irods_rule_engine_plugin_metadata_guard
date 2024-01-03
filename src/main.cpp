@@ -19,6 +19,9 @@
 #include <boost/any.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 
+#include <boost/exception/diagnostic_information.hpp> 
+
+
 #include <string>
 #include <algorithm>
 #include <array>
@@ -104,16 +107,32 @@ namespace
 
     auto rule_logic(const std::string& _object_name, ruleExecInfo_t& rei) -> irods::error
     {
+    try {
+            log_re::error("7");
+
+            log_re::error(_object_name);
         const auto config = load_plugin_config(rei);
         const auto& prefixes = config->at("prefixes");
         if(std::any_of(prefixes.cbegin(), prefixes.cend(), [&_object_name](const json& prefix) { return boost::starts_with(_object_name, prefix.get_ref<const std::string&>()); })) {
             if (config->count("admin_only") && config->at("admin_only").get<bool>()) {
                 return user_is_administrator(*rei.rsComm);
             }
+            log_re::error("8");
+
+            log_re::error(_object_name);
+
+
+
 
             namespace adm = irods::experimental::administration;
             const adm::user user{rei.uoic->userName, rei.uoic->rodsZone};
             const auto& editors = config->at("editors");
+
+            log_re::error("9");
+
+            log_re::error(_object_name);
+
+
 
             if(std::any_of(editors.cbegin(), editors.cend(), [&rei, &user](const json& editor) { 
                     const auto& type = editor.at("type").get_ref<const std::string&>();
@@ -129,10 +148,32 @@ namespace
                         return false;
                     }
                })) {
+            log_re::error("10");
+
+            log_re::error(_object_name);
+
+
+
             return CODE(RULE_ENGINE_CONTINUE);
             }
             return ERROR(CAT_INSUFFICIENT_PRIVILEGE_LEVEL, "User is not allowed to modify metadata");
+            log_re::error("11");
+
+            log_re::error(_object_name);
+
+
+
         }
+            log_re::error("12");
+
+            log_re::error(_object_name);
+        } catch (...) {
+
+            log_re::error("4444444");
+            log_re::error(boost::current_exception_diagnostic_information());
+        }
+
+
         return CODE(RULE_ENGINE_CONTINUE);
     }
 
@@ -222,27 +263,38 @@ namespace
 
             return {true, ""};
         };
+            log_re::error("2");
+
 
         try {
             auto* input_bb = boost::any_cast<bytesBuf_t*>(*std::next(std::begin(_rule_arguments), 2));
             auto& rei = get_rei(_effect_handler);
             const auto config = load_plugin_config(rei);
 
+            log_re::error("3");
+
             if (const auto [valid, msg] = is_input_valid(input_bb); !valid) {
-                log_re::error({{"log_message", msg}, {"error_message", e.what()}});
+                log_re::error({{"log_message", msg}});
                 return ERROR(INPUT_ARG_NOT_WELL_FORMED_ERR, msg);
             }
+
+            log_re::error("4");
 
             json input = json::parse(std::string(static_cast<const char*>(input_bb->buf), input_bb->len));
 
             const auto& operations = input.at("operations");
             std::vector<irods::error> op_codes; 
+            log_re::error("5");
+
             std::transform(operations.begin(), operations.end(), op_codes.begin(), [&rei](json op) {
-                return rule_logic(op.at("attribute").get_ref<const std::string&>(), rei);
+//                return rule_logic(op.at("attribute").get_ref<const std::string&>(), rei);
+                return SUCCESS();
             });
             if(const auto& ret = std::find_if(op_codes.begin(), op_codes.end(), [&op_codes](const irods::error& err) { return !err.ok(); }); ret != op_codes.end()) {
+            log_re::error("20");
                 return *ret;
             }
+            log_re::error("21");
                 return CODE(RULE_ENGINE_CONTINUE);
         }
         catch (const json::parse_error& e) {
@@ -250,6 +302,10 @@ namespace
         }
         catch (const std::exception& e) {
             log_re::error({{"log_message", e.what()}, {"rule_engine_plugin", "metadata_guard"}});
+        }
+        catch (...) {
+            log_re::error("33333333");
+            log_re::error(boost::current_exception_diagnostic_information());
         }
         return CODE(RULE_ENGINE_CONTINUE);
     }
@@ -263,6 +319,7 @@ namespace
         std::unordered_map<std::string, std::function<irods::error(std::list<boost::any>&, irods::callback )>> lookup_table{
             {"pep_api_mod_avu_metadata_pre",  exec_rule_modavu},
             {"pep_api_atomic_apply_metadata_operations_pre", exec_rule_atomic_metadata}};
+            log_re::error("1");
         if(lookup_table.contains(_rule_name)) {
             return lookup_table.at(_rule_name)(_rule_arguments, _effect_handler);
         }
